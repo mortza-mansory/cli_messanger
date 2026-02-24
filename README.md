@@ -109,14 +109,7 @@ internal/
     └── cors.go           # Allows browser testing
 ```
 
-### Client (Go + tview)
-```
-cmd/client/
-├── main.go               # The TUI application
-└── ui/
-    ├── chat_window.go    # Where messages appear
-    ├── input_bar.go      # Where you type
-    └── colors.go         # Color handling
+
 ```
 
 ## API Reference
@@ -196,40 +189,6 @@ GET /api/stats
 - Go 1.21 or higher
 - Git
 
-### Quick Start
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/cli-messenger
-cd cli-messenger
-
-# Install dependencies
-go mod tidy
-
-# Start the server (in one terminal)
-cd cmd/server
-go run main.go -port=8034 -key=my_secret_key_2024
-
-# Start a client (in another terminal)
-cd cmd/client
-go run main.go -server=http://localhost:8034 -key=my_secret_key_2024
-
-# Start another client (third terminal)
-cd cmd/client
-go run main.go -server=http://localhost:8034 -key=my_secret_key_2024
-```
-
-### Running on Different Platforms
-
-**Linux/macOS:**
-```bash
-./build.sh  # Creates binaries for all platforms
-```
-
-**Windows:**
-```powershell
-go build -o server.exe cmd/server/main.go
-go build -o client.exe cmd/client/main.go
-```
 
 **Android (Termux):**
 ```bash
