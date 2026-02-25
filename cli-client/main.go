@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import (
@@ -14,7 +12,6 @@ import (
 	"cli-client/views"
 
 	"github.com/rivo/tview"
-	"golang.org/x/sys/windows"
 )
 
 var logFile *os.File
@@ -28,15 +25,6 @@ func init() {
 	if err != nil {
 		fmt.Println("Failed to open error log file:", err)
 		return
-	}
-
-	// SetStdHandle replaces the process stderr handle with our log file so
-	// the runtime crash dump and goroutine stacks land in error.txt.
-	if err := windows.SetStdHandle(
-		windows.STD_ERROR_HANDLE,
-		windows.Handle(logFile.Fd()),
-	); err != nil {
-		fmt.Println("Warning: could not redirect stderr to error.txt:", err)
 	}
 
 	// Also wire up the standard logger to the same file.
