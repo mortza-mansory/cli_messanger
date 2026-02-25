@@ -16,7 +16,7 @@ import (
 	"github.com/rivo/tview"
 )
 
-var DefaultServerURL = "http://localhost:8034"
+var DefaultServerURL = "http://tccbackend-production-831d.up.railway.app"
 
 const serverAccessKey = "secure_chat_key_2024"
 
@@ -171,6 +171,11 @@ func (nc *NetworkClient) Stop() {
 		log.Printf("TRACE NetworkClient.Stop: closing stopCh")
 		close(nc.stopCh)
 	}
+}
+
+// ServerURL returns the relay server base URL this client is connected to.
+func (nc *NetworkClient) ServerURL() string {
+	return nc.serverURL
 }
 
 // ── Send ──────────────────────────────────────────────────────────────────────
@@ -403,4 +408,42 @@ func minDur(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// ── Server stats ──────────────────────────────────────────────────────────────
+
+// ServerStats mirrors the /api/stats response.
+type ServerStats struct {
+	ChatStats struct {
+		TotalMessages  int `json:"total_messages"`
+		WaitingClients int `json:"waiting_clients"`
+		MaxWaiters     int `json:"max_waiters"`
+	} `json:"chat_stats"`
+	ActiveClients int    `json:"active_clients"`
+	Status        string `json:"status"`
+}
+
+// FetchStats calls GET /api/stats and returns the parsed result.
+// Uses a short 5-second timeout — stats are non-critical, failure is silent.
+func (nc *NetworkClient) FetchStats() (*ServerStats, error) {
+	params := url.Values{}
+	params.Set("access_key", serverAccessKey)
+	params.Set("client_id", nc.clientID)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(nc.serverURL + "/api/stats?" + params.Encode())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("stats HTTP %d", resp.StatusCode)
+	}
+
+	var stats ServerStats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return nil, fmt.Errorf("decode stats: %w", err)
+	}
+	return &stats, nil
 }

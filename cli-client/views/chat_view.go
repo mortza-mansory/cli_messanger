@@ -38,6 +38,14 @@ type ChatView struct {
 	headerLatency  int
 	headerOnline   bool
 
+	// Server stats — updated by UpdateStats(), only in tview event loop
+	statsTotalMsgs  int
+	statsActive     int
+	statsWaiting    int
+	statsMaxMsgs    int
+	statsMaxWaiters int
+	statsServerURL  string
+
 	// Nick mode / message history — only touched inside tview event loop
 	nickActive  bool
 	sentHistory []string
@@ -69,13 +77,16 @@ func NewChatView(
 	onCommand func(string),
 ) *ChatView {
 	c := &ChatView{
-		app:           app,
-		onSendMessage: onSendMessage,
-		onCommand:     onCommand,
-		historyIdx:    -1,
-		headerLatency: 18,
-		headerOnline:  true,
-		inFlight:      make(map[int]string),
+		app:             app,
+		onSendMessage:   onSendMessage,
+		onCommand:       onCommand,
+		historyIdx:      -1,
+		headerLatency:   18,
+		headerOnline:    true,
+		inFlight:        make(map[int]string),
+		statsMaxMsgs:    1000,
+		statsMaxWaiters: 1000,
+		statsServerURL:  "localhost:8034",
 	}
 	// Default to STATIC mode. Animation mode (word-by-word) involves a
 	// goroutine that reads from a channel while holding a QueueUpdateDraw
@@ -189,13 +200,14 @@ func (c *ChatView) buildUI() {
 	c.footer = tview.NewTextView()
 	c.footer.SetDynamicColors(true)
 	c.footer.SetTextAlign(tview.AlignLeft)
-	c.footer.SetText("[magenta]NORMAL[white]    SecTherminal              UTF-8    L:1, C:1")
 	c.footer.SetBackgroundColor(tcell.ColorBlack)
+	// initial content drawn after stats fields are set
+	c.redrawFooter()
 
 	c.container = tview.NewFlex()
 	c.container.SetDirection(tview.FlexRow)
 	c.container.SetBackgroundColor(tcell.ColorBlack)
-	c.container.AddItem(c.header, 3, 0, false) // 3 = border top + 1 line + border bottom
+	c.container.AddItem(c.header, 5, 0, false) // 5 = border top + 2 content lines + border bottom
 	c.container.AddItem(c.messageView, 0, 1, false)
 	c.container.AddItem(c.commandBar, 1, 0, false)
 	c.container.AddItem(c.inputField, 3, 0, true)
@@ -293,7 +305,9 @@ func formatLine(msg *models.Message) string {
 	safeContent := sanitizeContent(msg.Content)
 	// [ts] and [username] are NOT valid tview color names so tview passes them
 	// through as literal bracket-wrapped text — no [[] escaping needed.
-	return fmt.Sprintf("[gray][%s][-] %s[%s][-]%s %s[-]\n",
+	// [%s] for timestamp → passes through (digits+colon = never a color name)
+	// [[]%s] for username → [[] is tview escape for literal "[", so output is [username]
+	return fmt.Sprintf("[gray][%s][-] %s[[]%s][-] %s%s[-]\n",
 		ts, color, safeUser, color, safeContent)
 }
 
@@ -306,7 +320,7 @@ func formatLine(msg *models.Message) string {
 func incomingPrefix(colorTag, username string) string {
 	ts := time.Now().Format("15:04")
 	safeUser := sanitizeContent(username) // escapes any [ inside the username itself
-	return fmt.Sprintf("[gray][%s][-] %s[%s][-]%s ",
+	return fmt.Sprintf("[gray][%s][-] %s[[]%s][-] %s",
 		ts, colorTag, safeUser, colorTag)
 }
 
@@ -550,14 +564,18 @@ func (c *ChatView) startClockTicker() {
 }
 
 // redrawHeader repaints the header content.
-// Layout:  [GLOBAL]  HH:MM:SS  @username    ●ONLINE  LATENCY:Xms
+//
+// Row 1:  [GLOBAL]  HH:MM:SS  @username    ●ONLINE/OFFLINE  LATENCY:Xms
+// Row 2:  msgs ▓▓▓▓▓░░░░░ 47/1000  │  ●●●○○ 3 active  │  0 waiting
+//
 // Must be called from within the tview event loop.
 func (c *ChatView) redrawHeader() {
 	clock := time.Now().Format("15:04:05")
 
-	onlineStr := "[red]●OFFLINE[-]"
+	// ── Row 1 ────────────────────────────────────────────────────────────────
+	onlineStr := "[red]● OFFLINE[-]"
 	if c.headerOnline {
-		onlineStr = "[green]●ONLINE[-]"
+		onlineStr = "[green]● ONLINE[-]"
 	}
 
 	userStr := ""
@@ -565,15 +583,77 @@ func (c *ChatView) redrawHeader() {
 		userStr = fmt.Sprintf("  [yellow]@%s[-]", c.headerUsername)
 	}
 
-	latencyStr := "[dim]LATENCY:--ms[-]"
+	latencyColor := "green"
+	if c.headerLatency > 100 {
+		latencyColor = "yellow"
+	}
+	if c.headerLatency > 300 {
+		latencyColor = "red"
+	}
+	latencyStr := "[dim]ping: --ms[-]"
 	if c.headerLatency >= 0 {
-		latencyStr = fmt.Sprintf("[dim]LATENCY:%dms[-]", c.headerLatency)
+		latencyStr = fmt.Sprintf("[dim]ping: [%s]%dms[-][-]", latencyColor, c.headerLatency)
 	}
 
-	c.header.SetText(fmt.Sprintf(
-		"[cyan][GLOBAL][-]  [dim]%s[-]%s    %s  %s",
-		clock, userStr, onlineStr, latencyStr,
-	))
+	row1 := fmt.Sprintf("[cyan]◈ GLOBAL[-]  [dim]%s[-]%s    %s   %s",
+		clock, userStr, onlineStr, latencyStr)
+
+	// ── Row 2: live server stats ─────────────────────────────────────────────
+	// Active users: up to 5 colored dots, then "+N"
+	activeDots := ""
+	dotColors := []string{"green", "cyan", "yellow", "magenta", "blue"}
+	n := c.statsActive
+	if n > 5 {
+		for i := 0; i < 5; i++ {
+			activeDots += fmt.Sprintf("[%s]●[-]", dotColors[i])
+		}
+		activeDots += fmt.Sprintf("[dim]+%d[-]", n-5)
+	} else {
+		for i := 0; i < 5; i++ {
+			if i < n {
+				activeDots += fmt.Sprintf("[%s]●[-]", dotColors[i])
+			} else {
+				activeDots += "[dim]○[-]"
+			}
+		}
+	}
+
+	waitColor := "dim"
+	if c.statsWaiting > 0 {
+		waitColor = "cyan"
+	}
+
+	row2 := fmt.Sprintf(
+		"[dim]total msgs: [-][cyan]%d[-]   [dim]│[-]   %s [dim]%d active[-]   [dim]│   [%s]%d waiting[-][-]",
+		c.statsTotalMsgs,
+		activeDots, c.statsActive,
+		waitColor, c.statsWaiting,
+	)
+
+	c.header.SetText(row1 + "\n" + row2)
+}
+
+// UpdateStats refreshes the server stats displayed in the header and footer.
+// Safe to call from any goroutine.
+func (c *ChatView) UpdateStats(totalMsgs, active, waiting, maxMsgs, maxWaiters int, serverURL string) {
+	if atomic.LoadInt32(&c.stopped) == 1 {
+		return
+	}
+	c.app.QueueUpdateDraw(func() {
+		if atomic.LoadInt32(&c.stopped) == 1 {
+			return
+		}
+		c.statsTotalMsgs = totalMsgs
+		c.statsActive = active
+		c.statsWaiting = waiting
+		c.statsMaxMsgs = maxMsgs
+		c.statsMaxWaiters = maxWaiters
+		if serverURL != "" {
+			c.statsServerURL = serverURL
+		}
+		c.redrawHeader()
+		c.redrawFooter()
+	})
 }
 
 // SetCurrentUser pushes the logged-in username to the header.
@@ -641,6 +721,30 @@ func (c *ChatView) redrawCommandBar() {
 	c.commandBar.SetText(fmt.Sprintf(
 		"[dim]/ commands: clear  whois  nick  mode  user_color  latency  info  exit  help[-]   %s%s",
 		modeLabel, nickLabel,
+	))
+	c.redrawFooter() // keep mode label in footer in sync
+}
+
+// redrawFooter repaints the bottom status bar with secondary server info.
+// Must be called from within the tview event loop.
+func (c *ChatView) redrawFooter() {
+	if c.footer == nil {
+		return // called before buildUI() finished initializing c.footer
+	}
+
+	modeLabel := "[cyan]ANIM[-]"
+	if atomic.LoadInt32(&c.animMode) == 0 {
+		modeLabel = "[green]STATIC[-]"
+	}
+
+	url := c.statsServerURL
+	if url == "" {
+		url = "localhost:8034"
+	}
+
+	c.footer.SetText(fmt.Sprintf(
+		"[dim]server:[cyan]%s[-]  [dim]│  mode:%s[-]  [dim]│[-]  [magenta]SecTherminal v1.0[-]",
+		url, modeLabel,
 	))
 }
 

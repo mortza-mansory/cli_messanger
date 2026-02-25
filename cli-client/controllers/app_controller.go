@@ -3,6 +3,7 @@ package controllers
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"cli-client/models"
 	"cli-client/views"
@@ -34,8 +35,16 @@ func (ac *AppController) RegisterView(screen models.Screen, view interface{}) {
 }
 
 // OnLoginSubmit — called from the tview event loop.
-func (ac *AppController) OnLoginSubmit(username, password string) {
+// username is the entered username; colorTag is the tview color tag chosen
+// during login (e.g. "[cyan]"). If empty, falls back to hash-based default.
+func (ac *AppController) OnLoginSubmit(username, colorTag string) {
 	ac.App.SetCurrentUser(username)
+
+	// Apply the color chosen during login immediately, before any messages render.
+	if colorTag != "" && strings.HasPrefix(colorTag, "[") {
+		ac.App.SetUserColor(username, colorTag)
+	}
+
 	ac.SM.Transition(models.ScreenChat)
 
 	if chat, ok := ac.Views[models.ScreenChat].(*views.ChatView); ok {
@@ -97,11 +106,11 @@ func (ac *AppController) OnCommand(command string) {
 
 	case "info":
 		lines := []string{
-			"[dim]┌─ TTC ──────────────────────────────────────────────┐[-]",
+			"[dim]┌─ SecTherminal ──────────────────────────────────────────────┐[-]",
 			"  A lightweight, encrypted terminal messenger built in Go.",
 			"  Designed for speed, privacy, and minimal footprint.",
 			"",
-			"  [cyan]Author   [-]Mortza Mansory -- https://mortza-mansory.github.io/",
+			"  [cyan]Author   [-]SecTherminal contributors",
 			"  [cyan]License  [-]MIT — free and open-source",
 			"  [cyan]GitHub   [-]https://github.com/SecTherminal/sectherminal",
 			"  [cyan]Version  [-]v1.0.0-dev",
@@ -283,6 +292,49 @@ func (ac *AppController) startNetworkClient() {
 	)
 
 	ac.netClient.Start()
+	go ac.statsPollerLoop()
+}
+
+func (ac *AppController) statsPollerLoop() {
+	// Poll /api/stats every 8 seconds and push results to the chat header.
+	// Runs as a goroutine alongside the poll loop; stops when netClient stops.
+	ticker := time.NewTicker(8 * time.Second)
+	defer ticker.Stop()
+
+	// Fetch once immediately so header shows data before the first tick.
+	ac.fetchAndPushStats()
+
+	for {
+		select {
+		case <-ticker.C:
+			if ac.netClient == nil {
+				return
+			}
+			ac.fetchAndPushStats()
+		}
+	}
+}
+
+func (ac *AppController) fetchAndPushStats() {
+	if ac.netClient == nil {
+		return
+	}
+	stats, err := ac.netClient.FetchStats()
+	if err != nil {
+		return // non-critical — silently skip bad fetches
+	}
+	chat, ok := ac.Views[models.ScreenChat].(*views.ChatView)
+	if !ok {
+		return
+	}
+	chat.UpdateStats(
+		stats.ChatStats.TotalMessages,
+		stats.ActiveClients,
+		stats.ChatStats.WaitingClients,
+		stats.ChatStats.MaxWaiters, // reuse maxWaiters as maxMsgs (server exposes 1000 for both)
+		stats.ChatStats.MaxWaiters,
+		ac.netClient.ServerURL(),
+	)
 }
 
 func (ac *AppController) stopNetworkClient() {
